@@ -1,46 +1,54 @@
 -- TODO
--- write simple HM using Condition
---   Monad.Condition.Util?
---     - error printing
+-- write simple HM using Condition as example
+-- Monad.Condition.Util?
+--   - help with exploring output
 module Monad.Condition
-  ( Name, Condition, runCondition
+  ( Name, Condition, WrittenEnv
+  , runCondition
   , get, store, put, filterEnv, modifyAll
-  , printEnv
-  , amb, exit
+  , printEnv, writeEnv, writeEnvF
+  , amb, exit, assert, kill
   ) where
 
+import Prelude hiding (not)
 import Data.Maybe (fromJust, mapMaybe)
 import qualified Data.Map as M
---import Control.Monad.Trans.State hiding (get, put)
---import qualified Control.Monad.Trans.State as S (get, put)
 import Control.Monad
 import Control.Monad.Trans.Class
 -- Use MTL for MonadState class
 import Control.Monad.State hiding (get, put)
 import qualified Control.Monad.State as S (get, put)
 import Control.Monad.Trans.Either
-import Data.Either (isRight, isLeft)
+import Data.Either (isLeft)
+import Control.Arrow (first, second)
 
 newtype Name = N Integer
  deriving (Eq, Ord)
 
+toInt :: Name -> Integer
+toInt (N i) = i
+
 instance Show Name where
   show (N i) = "#" ++ show i
 
-type CState a = (Integer, M.Map Name a)
-emptyChain :: CState a
+
+type Env a = (Integer, M.Map Name a)
+type WrittenEnv a = (Integer, [(Integer, a)])
+
+emptyChain :: Env a
 emptyChain = (0, M.empty)
 
-type Error = String
+-- "\s -> [(Either e x, s)]".   where s = Env v
+type Condition e v = EitherT e (StateT (Env v) [])
 
--- \s -> [(Either e x, s)]
-type Condition e v = EitherT e (StateT (CState v) [])
---type Condition a = (StateT (CState a) (EitherT Error []))
+writeEnv :: Env a -> WrittenEnv a
+writeEnv = second $ map (first toInt) . M.toList
 
-runCondition :: Condition e s a -> [(Either e a, CState s)]
+writeEnvF :: Functor f => Env (f Name) -> WrittenEnv (f Integer)
+writeEnvF = second $ map (\(N int, val) -> (int, fmap toInt val)) . M.toList
+
+runCondition :: Condition e s a -> [(Either e a, Env s)]
 runCondition m = runStateT (runEitherT m) emptyChain
---runCondition :: Condition s a -> [Either Error (a, CState s)]
---runCondition m = runEitherT $ runStateT m emptyChain
 
 get :: Name -> Condition e a a
 get name = do
@@ -73,18 +81,19 @@ printEnv = do
   (_, env) <- S.get
   return (unlines $ map show (M.toList env))
 
---amb :: Condition a b -> Condition a b -> Condition a b
---amb m1 m2 = StateT $ \s -> EitherT $ runEitherT (runStateT m1 s) ++ runEitherT (runStateT m2 s)
+-- Must explicitly define this; `mplus` defaults to EitherT
+-- TODO replace ++ with interleave?
 amb :: Condition e a b -> Condition e a b -> Condition e a b
 amb m1 m2 = EitherT $ StateT $ \s -> 
   (runStateT (runEitherT m1) s) ++ (runStateT (runEitherT m2) s)
 
-
-
+-- Logical negation
+-- soft failure -> success
+-- success -> hard failure
+-- (hard failure remains hard failure)
 -- TODO is this good?
--- TODO use soft failure?
-negative :: Condition e a b -> Condition e a ()
-negative m = EitherT $ StateT $ \s0 ->
+not :: Condition e a b -> Condition e a ()
+not m = EitherT $ StateT $ \s0 ->
   runStateT (runEitherT m) s0 $>
   filter (isLeft . fst) $>
   map (\(_, s) -> (Right (), s))
@@ -96,7 +105,7 @@ exit :: e -> Condition e a b
 -- Soft failure
 exit = left
 
-kill :: Condition e a ()
+kill :: Condition e a b
 -- Hard failure, no record left
 kill = EitherT (StateT (\s -> []))
 
@@ -104,11 +113,12 @@ assert :: Bool -> e -> Condition e a ()
 assert cond msg =
   if cond then return () else exit msg
 
-main = do
+-- Test
+p1 = do
   x <- store 0 `amb` store 1 `amb` store 2
   y <- store 2
   val <- get x
-  (assert (val == 0) $ show val)
+  not (assert (val == 0) $ show val)
   return (x, y)
 
 
